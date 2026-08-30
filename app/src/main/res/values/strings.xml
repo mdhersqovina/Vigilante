@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Vigilante</string>
+    <string name="welcome_title">Welcome!</string>
+    <string name="welcome_subtitle">Enter your session code to start playing</string>
+    <string name="start_session">START SESSION</string>
+    <string name="need_help">Need help? Please contact the receptionist.</string>
+
+    <string name="time_now">10:30 AM</string>
+    <string name="online">Online</string>
+    <string name="offline">Offline</string>
+
+    <string name="station_label">STATION</string>
+    <string name="station_name">PS5 - STATION 01</string>
+
+    <string name="rate_label">Rate</string>
+    <string name="rate_value">TSh 2,500</string>
+    <string name="rate_unit">/ Hour</string>
+
+    <string name="status_label">Status</string>
+    <string name="status_value">Available</string>
+
+    <string name="min_time_label">Min. Time</string>
+    <string name="min_time_value">30 Min</string>
+    <string name="min_time_unit">Per Session</string>
+
+    <string name="feature_secure_title">Secure</string>
+    <string name="feature_secure_desc">Your session is fully protected</string>
+
+    <string name="feature_realtime_title">Real-time</string>
+    <string name="feature_realtime_desc">Live time tracking for fair play</string>
+
+    <string name="feature_reliable_title">Reliable</string>
+    <string name="feature_reliable_desc">Accurate time and billing</string>
+
+    <string name="secured_by_vigilant">This device is secured and managed by &lt;b&gt;&lt;font color=\'#2F6FED\'&gt;VIGILANT.&lt;/font&gt;&lt;/b&gt;</string>
+    <string name="code_accepted">Code accepted</string>
+    <string name="device_unlocked">Device unlocked</string>
+    <string name="invalid_code_message">Invalid activation code</string>
+    <string name="invalid_code_toast">Invalid code</string>
+    <string name="tv_locked">TV LOCKED</string>
+    <string name="device_owner_not_configured">Device Owner not configured</string>
+    <string name="unlocked">Unlocked</string>
+    <string name="device_is_locked">Device is locked</string>
+</resources>
