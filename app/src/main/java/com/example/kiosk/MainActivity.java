@@ -13,9 +13,12 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.UserManager;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.Html;
 import android.text.TextWatcher;
@@ -26,9 +29,16 @@ import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.google.firebase.firestore.DocumentReference;
+import com.google.firebase.firestore.FirebaseFirestore;
+import com.google.firebase.firestore.ListenerRegistration;
+import com.google.firebase.firestore.QueryDocumentSnapshot;
+
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 
 public class MainActivity extends AppCompatActivity {
@@ -45,9 +55,8 @@ public class MainActivity extends AppCompatActivity {
     private TextView tvClock;
     private TextView tvOnlineStatus;
     private View vOnlineDot;
+    private View unlockButton;
 
-    private static final String DEMO_CODE = "123456";
-    private static final long UNLOCK_DURATION_MS = 120000; // 2 minutes
     private static final String PREFS_NAME = "KioskPrefs";
     private static final String KEY_UNLOCK_EXPIRY = "unlock_expiry";
 
@@ -66,11 +75,20 @@ public class MainActivity extends AppCompatActivity {
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
 
+    private FirebaseFirestore db;
+    private String deviceId;
+    private ListenerRegistration stationListener;
+    private boolean isVerifying = false;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         setContentView(R.layout.activity_main);
+
+        // Initialize Firebase
+        db = FirebaseFirestore.getInstance();
+        deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
 
         pinInputs[0] = findViewById(R.id.pin_1);
         pinInputs[1] = findViewById(R.id.pin_2);
@@ -79,7 +97,7 @@ public class MainActivity extends AppCompatActivity {
         pinInputs[4] = findViewById(R.id.pin_5);
         pinInputs[5] = findViewById(R.id.pin_6);
 
-        View unlockButton = findViewById(R.id.unlockButton);
+        unlockButton = findViewById(R.id.unlockButton);
         statusText = findViewById(R.id.statusText);
         tvSecuredBy = findViewById(R.id.tvSecuredBy);
         
@@ -95,6 +113,8 @@ public class MainActivity extends AppCompatActivity {
         adminComponent = new ComponentName(this, MyDeviceAdminReceiver.class);
 
         configureKiosk();
+        registerStation();
+        listenForRemoteCommands();
 
         // Prevent back button
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
@@ -111,24 +131,131 @@ public class MainActivity extends AppCompatActivity {
         });
 
         if (unlockButton != null) {
-            unlockButton.setOnClickListener(v -> {
-                StringBuilder sb = new StringBuilder();
-                for (EditText et : pinInputs) {
-                    sb.append(et.getText().toString().trim());
-                }
-                String enteredCode = sb.toString();
-
-                if (Objects.equals(enteredCode, DEMO_CODE)) {
-                    statusText.setText(R.string.code_accepted);
-                    Toast.makeText(this, R.string.device_unlocked, Toast.LENGTH_SHORT).show();
-                    stopKiosk();
-                } else {
-                    statusText.setText(R.string.invalid_code_message);
-                    clearPin();
-                    Toast.makeText(this, R.string.invalid_code_toast, Toast.LENGTH_SHORT).show();
-                }
-            });
+            unlockButton.setOnClickListener(v -> submitCode());
         }
+    }
+
+    private void submitCode() {
+        if (isVerifying) return;
+
+        StringBuilder sb = new StringBuilder();
+        for (EditText et : pinInputs) {
+            sb.append(et.getText().toString().trim());
+        }
+        String enteredCode = sb.toString();
+        if (enteredCode.length() == 6) {
+            verifyUnlockCode(enteredCode);
+        } else {
+            Toast.makeText(this, "Please enter 6-digit code", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void registerStation() {
+        DocumentReference docRef = db.collection("stations").document(deviceId);
+        docRef.get().addOnSuccessListener(documentSnapshot -> {
+            if (!documentSnapshot.exists()) {
+                Map<String, Object> station = new HashMap<>();
+                station.put("deviceId", deviceId);
+                station.put("status", "Pending Setup");
+                station.put("name", "New TV Device");
+                docRef.set(station);
+            }
+        });
+    }
+
+    private void listenForRemoteCommands() {
+        stationListener = db.collection("stations").document(deviceId)
+                .addSnapshotListener((snapshot, e) -> {
+                    if (e != null) {
+                        Log.w(TAG, "Listen failed.", e);
+                        return;
+                    }
+
+                    if (snapshot != null && snapshot.exists()) {
+                        String remoteStatus = snapshot.getString("status");
+                        if ("Locked".equalsIgnoreCase(remoteStatus) || "Shutdown".equalsIgnoreCase(remoteStatus)) {
+                            if (isCurrentlyUnlocked()) {
+                                Log.d(TAG, "Remote Kill Signal received");
+                                relockDevice();
+                            }
+                        }
+                    }
+                });
+    }
+
+    private void verifyUnlockCode(String enteredCode) {
+        setVerifyingState(true);
+        statusText.setText("Verifying code...");
+
+        db.collection("unlock_codes")
+                .whereEqualTo("code", enteredCode)
+                .whereEqualTo("status", "PENDING")
+                .get()
+                .addOnSuccessListener(queryDocumentSnapshots -> {
+                    if (!queryDocumentSnapshots.isEmpty()) {
+                        for (QueryDocumentSnapshot document : queryDocumentSnapshots) {
+                            processUnlock(document);
+                            return;
+                        }
+                    } else {
+                        setVerifyingState(false);
+                        statusText.setText(R.string.invalid_code_message);
+                        clearPin();
+                        Toast.makeText(this, R.string.invalid_code_toast, Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .addOnFailureListener(e -> {
+                    setVerifyingState(false);
+                    statusText.setText("Network error. Try again.");
+                    Toast.makeText(this, "Connection Error", Toast.LENGTH_SHORT).show();
+                });
+    }
+
+    private void setVerifyingState(boolean verifying) {
+        this.isVerifying = verifying;
+        if (unlockButton != null) {
+            unlockButton.setEnabled(!verifying);
+            unlockButton.setAlpha(verifying ? 0.5f : 1.0f);
+        }
+        for (EditText et : pinInputs) {
+            et.setEnabled(!verifying);
+        }
+    }
+
+    private void processUnlock(QueryDocumentSnapshot document) {
+        String docId = document.getId();
+        Long durationMinutes = document.getLong("duration");
+        String player = document.getString("player");
+
+        if (durationMinutes == null) durationMinutes = 30L;
+        long durationMs = durationMinutes * 60 * 1000;
+
+        // Trigger local unlock immediately for instant feel
+        long startTime = System.currentTimeMillis();
+        long expiryTime = startTime + durationMs;
+        
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putLong(KEY_UNLOCK_EXPIRY, expiryTime)
+                .apply();
+
+        statusText.setText(R.string.code_accepted);
+        Toast.makeText(this, R.string.device_unlocked, Toast.LENGTH_SHORT).show();
+        
+        stopLockTask();
+        moveTaskToBack(true);
+        handler.postDelayed(relockRunnable, durationMs);
+        setVerifyingState(false);
+
+        // Perform Firestore updates in background
+        db.collection("unlock_codes").document(docId).update("status", "ACTIVE");
+        
+        Map<String, Object> update = new HashMap<>();
+        update.put("status", "Active");
+        update.put("startTime", startTime);
+        update.put("prepaidDuration", durationMinutes);
+        update.put("player", player);
+        db.collection("stations").document(deviceId).update(update);
     }
 
     private void setupStyledFooter() {
@@ -147,8 +274,13 @@ public class MainActivity extends AppCompatActivity {
 
                 @Override
                 public void onTextChanged(CharSequence s, int start, int before, int count) {
-                    if (s.length() == 1 && index < 5) {
-                        pinInputs[index + 1].requestFocus();
+                    if (s.length() == 1) {
+                        if (index < 5) {
+                            pinInputs[index + 1].requestFocus();
+                        } else {
+                            // Automatically submit when the last digit is entered
+                            submitCode();
+                        }
                     }
                 }
 
@@ -212,6 +344,21 @@ public class MainActivity extends AppCompatActivity {
     private void configureKiosk() {
         if (devicePolicyManager != null && devicePolicyManager.isDeviceOwnerApp(getPackageName())) {
             devicePolicyManager.setLockTaskPackages(adminComponent, new String[]{getPackageName()});
+            
+            // Disable keyguard (system lock screen)
+            devicePolicyManager.setKeyguardDisabled(adminComponent, true);
+
+            // Add restrictions to block settings access and other system menus
+            devicePolicyManager.addUserRestriction(adminComponent, UserManager.DISALLOW_SAFE_BOOT);
+            devicePolicyManager.addUserRestriction(adminComponent, UserManager.DISALLOW_FACTORY_RESET);
+            devicePolicyManager.addUserRestriction(adminComponent, UserManager.DISALLOW_ADD_USER);
+            devicePolicyManager.addUserRestriction(adminComponent, UserManager.DISALLOW_MOUNT_PHYSICAL_MEDIA);
+            
+            // API 28+ features to explicitly block home/recents if supported
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                devicePolicyManager.setLockTaskFeatures(adminComponent, 0); 
+            }
+
             try {
                 startLockTask();
             } catch (Exception e) {
@@ -223,23 +370,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void stopKiosk() {
-        try {
-            long expiryTime = System.currentTimeMillis() + UNLOCK_DURATION_MS;
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                    .edit()
-                    .putLong(KEY_UNLOCK_EXPIRY, expiryTime)
-                    .apply();
-
-            stopLockTask();
-            statusText.setText(R.string.unlocked);
-            moveTaskToBack(true);
-            handler.postDelayed(relockRunnable, UNLOCK_DURATION_MS);
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to stop kiosk", e);
-        }
-    }
-
     private void relockDevice() {
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                 .edit()
@@ -248,10 +378,23 @@ public class MainActivity extends AppCompatActivity {
 
         clearPin();
         statusText.setText(R.string.tv_locked);
+        
+        handler.removeCallbacks(relockRunnable);
+
+        // Update station status to Time Up in Firestore
+        db.collection("stations").document(deviceId).update("status", "Time Up");
 
         Intent intent = new Intent(this, MainActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         startActivity(intent);
+
+        if (devicePolicyManager != null && devicePolicyManager.isDeviceOwnerApp(getPackageName())) {
+            try {
+                startLockTask();
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to start lock task in relock", e);
+            }
+        }
     }
 
     private void clearPin() {
@@ -270,11 +413,22 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (!isCurrentlyUnlocked()) {
-            if (event.getKeyCode() == KeyEvent.KEYCODE_BACK || event.getKeyCode() == KeyEvent.KEYCODE_ESCAPE) {
+            int keyCode = event.getKeyCode();
+            // Expanded list of keys to block when locked
+            if (keyCode == KeyEvent.KEYCODE_BACK ||
+                keyCode == KeyEvent.KEYCODE_ESCAPE ||
+                keyCode == KeyEvent.KEYCODE_MENU ||
+                keyCode == KeyEvent.KEYCODE_SETTINGS ||
+                keyCode == KeyEvent.KEYCODE_SEARCH ||
+                keyCode == KeyEvent.KEYCODE_TV_INPUT ||
+                keyCode == KeyEvent.KEYCODE_GUIDE ||
+                keyCode == KeyEvent.KEYCODE_DVR ||
+                keyCode == KeyEvent.KEYCODE_HOME) {
+
                 if (event.getAction() == KeyEvent.ACTION_UP) {
                     Toast.makeText(this, R.string.device_is_locked, Toast.LENGTH_SHORT).show();
                 }
-                return true;
+                return true; // Consume event
             }
         }
         return super.dispatchKeyEvent(event);
@@ -327,5 +481,8 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         handler.removeCallbacks(relockRunnable);
+        if (stationListener != null) {
+            stationListener.remove();
+        }
     }
 }
