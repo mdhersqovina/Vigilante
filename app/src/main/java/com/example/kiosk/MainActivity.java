@@ -188,7 +188,6 @@ public class MainActivity extends AppCompatActivity {
         setVerifyingState(true);
         statusText.setText("Verifying code...");
 
-        // We fetch the code regardless of deviceId first to provide better error messages
         db.collection("unlock_codes")
                 .whereEqualTo("code", enteredCode)
                 .whereEqualTo("status", "PENDING")
@@ -196,15 +195,23 @@ public class MainActivity extends AppCompatActivity {
                 .addOnSuccessListener(queryDocumentSnapshots -> {
                     if (!queryDocumentSnapshots.isEmpty()) {
                         for (QueryDocumentSnapshot document : queryDocumentSnapshots) {
-                            String targetDeviceId = document.getString("deviceId");
+                            // Check deviceId or stationId (handling common field names)
+                            String targetId = document.getString("deviceId");
+                            if (targetId == null) targetId = document.getString("stationId");
                             
-                            if (deviceId.equals(targetDeviceId)) {
+                            if (deviceId.equals(targetId)) {
                                 processUnlock(document);
                             } else {
                                 setVerifyingState(false);
-                                String errorMsg = "Code belongs to another station";
+                                String errorMsg;
+                                if (targetId == null) {
+                                    errorMsg = "Code is not assigned to any station";
+                                    Log.e(TAG, "Verification Failed: Code document " + document.getId() + " is missing 'deviceId' field.");
+                                } else {
+                                    errorMsg = "Code belongs to another station";
+                                    Log.w(TAG, "Station mismatch. This device: " + deviceId + ", Code target: " + targetId);
+                                }
                                 statusText.setText(errorMsg);
-                                Log.w(TAG, "Station mismatch. This device: " + deviceId + ", Code target: " + targetDeviceId);
                                 clearPin();
                                 Toast.makeText(this, errorMsg, Toast.LENGTH_LONG).show();
                             }
