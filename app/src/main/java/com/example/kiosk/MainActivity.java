@@ -89,6 +89,7 @@ public class MainActivity extends AppCompatActivity {
         // Initialize Firebase
         db = FirebaseFirestore.getInstance();
         deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+        Log.d(TAG, "Device ID: " + deviceId);
 
         pinInputs[0] = findViewById(R.id.pin_1);
         pinInputs[1] = findViewById(R.id.pin_2);
@@ -187,16 +188,26 @@ public class MainActivity extends AppCompatActivity {
         setVerifyingState(true);
         statusText.setText("Verifying code...");
 
-        // Filter by code, status AND deviceId to ensure Station A's code doesn't work on Station B
+        // We fetch the code regardless of deviceId first to provide better error messages
         db.collection("unlock_codes")
                 .whereEqualTo("code", enteredCode)
                 .whereEqualTo("status", "PENDING")
-                .whereEqualTo("deviceId", deviceId)
                 .get()
                 .addOnSuccessListener(queryDocumentSnapshots -> {
                     if (!queryDocumentSnapshots.isEmpty()) {
                         for (QueryDocumentSnapshot document : queryDocumentSnapshots) {
-                            processUnlock(document);
+                            String targetDeviceId = document.getString("deviceId");
+                            
+                            if (deviceId.equals(targetDeviceId)) {
+                                processUnlock(document);
+                            } else {
+                                setVerifyingState(false);
+                                String errorMsg = "Code belongs to another station";
+                                statusText.setText(errorMsg);
+                                Log.w(TAG, "Station mismatch. This device: " + deviceId + ", Code target: " + targetDeviceId);
+                                clearPin();
+                                Toast.makeText(this, errorMsg, Toast.LENGTH_LONG).show();
+                            }
                             return;
                         }
                     } else {
