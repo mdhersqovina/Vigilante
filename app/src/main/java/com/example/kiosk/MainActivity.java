@@ -187,9 +187,11 @@ public class MainActivity extends AppCompatActivity {
         setVerifyingState(true);
         statusText.setText("Verifying code...");
 
+        // Filter by code, status AND deviceId to ensure Station A's code doesn't work on Station B
         db.collection("unlock_codes")
                 .whereEqualTo("code", enteredCode)
                 .whereEqualTo("status", "PENDING")
+                .whereEqualTo("deviceId", deviceId)
                 .get()
                 .addOnSuccessListener(queryDocumentSnapshots -> {
                     if (!queryDocumentSnapshots.isEmpty()) {
