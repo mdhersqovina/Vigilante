@@ -5,6 +5,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.activity.OnBackPressedCallback;
 import androidx.core.content.ContextCompat;
 
+import android.app.ActivityManager;
 import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Context;
@@ -30,6 +31,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.google.firebase.firestore.DocumentReference;
+import com.google.firebase.firestore.DocumentSnapshot;
 import com.google.firebase.firestore.FirebaseFirestore;
 import com.google.firebase.firestore.ListenerRegistration;
 import com.google.firebase.firestore.QueryDocumentSnapshot;
@@ -57,6 +59,12 @@ public class MainActivity extends AppCompatActivity {
     private View vOnlineDot;
     private View unlockButton;
 
+    private TextView tvStationName;
+    private TextView tvHourlyRate;
+    private TextView tvStationStatusValue;
+    private TextView tvWelcomeTitle;
+    private TextView tvPrepaidDuration;
+
     private static final String PREFS_NAME = "KioskPrefs";
     private static final String KEY_UNLOCK_EXPIRY = "unlock_expiry";
 
@@ -68,7 +76,7 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void run() {
             updateClock();
-            handler.postDelayed(this, 10000); // update every 10 seconds
+            handler.postDelayed(this, 10000); 
         }
     };
 
@@ -86,10 +94,8 @@ public class MainActivity extends AppCompatActivity {
 
         setContentView(R.layout.activity_main);
 
-        // Initialize Firebase
         db = FirebaseFirestore.getInstance();
         deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
-        Log.d(TAG, "Device ID: " + deviceId);
 
         pinInputs[0] = findViewById(R.id.pin_1);
         pinInputs[1] = findViewById(R.id.pin_2);
@@ -106,6 +112,12 @@ public class MainActivity extends AppCompatActivity {
         tvOnlineStatus = findViewById(R.id.tv_online_status);
         vOnlineDot = findViewById(R.id.v_online_dot);
 
+        tvStationName = findViewById(R.id.tv_station_name);
+        tvHourlyRate = findViewById(R.id.tv_hourly_rate);
+        tvStationStatusValue = findViewById(R.id.tv_station_status_value);
+        tvWelcomeTitle = findViewById(R.id.tv_welcome_title);
+        tvPrepaidDuration = findViewById(R.id.tv_prepaid_duration);
+
         setupPinNavigation();
         setupStyledFooter();
         setupConnectivityMonitor();
@@ -117,7 +129,6 @@ public class MainActivity extends AppCompatActivity {
         registerStation();
         listenForRemoteCommands();
 
-        // Prevent back button
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
@@ -159,6 +170,7 @@ public class MainActivity extends AppCompatActivity {
                 station.put("deviceId", deviceId);
                 station.put("status", "Pending Setup");
                 station.put("name", "New TV Device");
+                station.put("hourlyRate", 1000.0);
                 docRef.set(station);
             }
         });
@@ -174,6 +186,24 @@ public class MainActivity extends AppCompatActivity {
 
                     if (snapshot != null && snapshot.exists()) {
                         String remoteStatus = snapshot.getString("status");
+                        String name = snapshot.getString("name");
+                        Double rate = snapshot.getDouble("hourlyRate");
+
+                        if (name != null && tvStationName != null) {
+                            tvStationName.setText(name);
+                        }
+                        if (rate != null && tvHourlyRate != null) {
+                            tvHourlyRate.setText(String.format(Locale.getDefault(), "TZS %,.0f", rate));
+                        }
+                        if (remoteStatus != null && tvStationStatusValue != null) {
+                            tvStationStatusValue.setText(remoteStatus);
+                            if ("Available".equalsIgnoreCase(remoteStatus) || "Active".equalsIgnoreCase(remoteStatus)) {
+                                tvStationStatusValue.setTextColor(ContextCompat.getColor(this, R.color.green_primary));
+                            } else {
+                                tvStationStatusValue.setTextColor(ContextCompat.getColor(this, R.color.red_primary));
+                            }
+                        }
+
                         if ("Locked".equalsIgnoreCase(remoteStatus) || "Shutdown".equalsIgnoreCase(remoteStatus)) {
                             if (isCurrentlyUnlocked()) {
                                 Log.d(TAG, "Remote Kill Signal received");
@@ -195,22 +225,14 @@ public class MainActivity extends AppCompatActivity {
                 .addOnSuccessListener(queryDocumentSnapshots -> {
                     if (!queryDocumentSnapshots.isEmpty()) {
                         for (QueryDocumentSnapshot document : queryDocumentSnapshots) {
-                            // Check deviceId or stationId (handling common field names)
                             String targetId = document.getString("deviceId");
                             if (targetId == null) targetId = document.getString("stationId");
                             
                             if (deviceId.equals(targetId)) {
-                                processUnlock(document);
+                                fetchDurationAndProcessUnlock(document);
                             } else {
                                 setVerifyingState(false);
-                                String errorMsg;
-                                if (targetId == null) {
-                                    errorMsg = "Code is not assigned to any station";
-                                    Log.e(TAG, "Verification Failed: Code document " + document.getId() + " is missing 'deviceId' field.");
-                                } else {
-                                    errorMsg = "Code belongs to another station";
-                                    Log.w(TAG, "Station mismatch. This device: " + deviceId + ", Code target: " + targetId);
-                                }
+                                String errorMsg = "Code belongs to another station";
                                 statusText.setText(errorMsg);
                                 clearPin();
                                 Toast.makeText(this, errorMsg, Toast.LENGTH_LONG).show();
@@ -231,6 +253,53 @@ public class MainActivity extends AppCompatActivity {
                 });
     }
 
+    private void fetchDurationAndProcessUnlock(QueryDocumentSnapshot codeDoc) {
+        // As a backup, fetch the latest station document to ensure we have the correct duration
+        db.collection("stations").document(deviceId).get().addOnCompleteListener(task -> {
+            long durationMinutes = 30L; // Default
+            String player = codeDoc.getString("player");
+
+            if (task.isSuccessful() && task.getResult() != null) {
+                DocumentSnapshot stationDoc = task.getResult();
+                // Try to find duration in station doc first (per user's snippet)
+                durationMinutes = parseDurationFromDoc(stationDoc);
+                
+                // If not found in station, try code doc
+                if (durationMinutes == 30L) {
+                    durationMinutes = parseDurationFromDoc(codeDoc);
+                }
+            } else {
+                // Fallback to code doc only
+                durationMinutes = parseDurationFromDoc(codeDoc);
+            }
+
+            Log.d(TAG, "FINAL DURATION SELECTED: " + durationMinutes + " minutes");
+            processUnlock(codeDoc, durationMinutes, player);
+        });
+    }
+
+    private long parseDurationFromDoc(DocumentSnapshot doc) {
+        String[] fields = {"prepaidDuration", "duration", "Duration"};
+        for (String field : fields) {
+            Object val = doc.get(field);
+            if (val == null) continue;
+
+            if (val instanceof Number) return ((Number) val).longValue();
+            
+            if (val instanceof String) {
+                String s = (String) val;
+                try { return Long.parseLong(s); } catch (NumberFormatException ignored) {}
+                if (s.contains(":")) {
+                    try {
+                        String[] parts = s.split(":");
+                        if (parts.length >= 2) return (long) Integer.parseInt(parts[0]) * 60 + Integer.parseInt(parts[1]);
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+        return 30L;
+    }
+
     private void setVerifyingState(boolean verifying) {
         this.isVerifying = verifying;
         if (unlockButton != null) {
@@ -242,15 +311,13 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void processUnlock(QueryDocumentSnapshot document) {
-        String docId = document.getId();
-        Long durationMinutes = document.getLong("duration");
-        String player = document.getString("player");
-
-        if (durationMinutes == null) durationMinutes = 30L;
+    private void processUnlock(QueryDocumentSnapshot codeDoc, long durationMinutes, String player) {
         long durationMs = durationMinutes * 60 * 1000;
 
-        // Trigger local unlock immediately for instant feel
+        if (tvPrepaidDuration != null) {
+            tvPrepaidDuration.setText(String.format(Locale.getDefault(), "%d Min", durationMinutes));
+        }
+
         long startTime = System.currentTimeMillis();
         long expiryTime = startTime + durationMs;
         
@@ -262,13 +329,20 @@ public class MainActivity extends AppCompatActivity {
         statusText.setText(R.string.code_accepted);
         Toast.makeText(this, R.string.device_unlocked, Toast.LENGTH_SHORT).show();
         
-        stopLockTask();
+        if (tvWelcomeTitle != null) {
+            tvWelcomeTitle.setText(R.string.welcome_title);
+        }
+
+        if (isInLockTaskMode()) {
+            stopLockTask();
+        }
         moveTaskToBack(true);
+        
+        handler.removeCallbacks(relockRunnable);
         handler.postDelayed(relockRunnable, durationMs);
         setVerifyingState(false);
 
-        // Perform Firestore updates in background
-        db.collection("unlock_codes").document(docId).update("status", "ACTIVE");
+        db.collection("unlock_codes").document(codeDoc.getId()).update("status", "ACTIVE");
         
         Map<String, Object> update = new HashMap<>();
         update.put("status", "Active");
@@ -276,6 +350,11 @@ public class MainActivity extends AppCompatActivity {
         update.put("prepaidDuration", durationMinutes);
         update.put("player", player);
         db.collection("stations").document(deviceId).update(update);
+    }
+
+    private boolean isInLockTaskMode() {
+        ActivityManager activityManager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        return activityManager.getLockTaskModeState() != ActivityManager.LOCK_TASK_MODE_NONE;
     }
 
     private void setupStyledFooter() {
@@ -291,24 +370,16 @@ public class MainActivity extends AppCompatActivity {
             pinInputs[index].addTextChangedListener(new TextWatcher() {
                 @Override
                 public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-
                 @Override
                 public void onTextChanged(CharSequence s, int start, int before, int count) {
                     if (s.length() == 1) {
-                        if (index < 5) {
-                            pinInputs[index + 1].requestFocus();
-                        } else {
-                            // Automatically submit when the last digit is entered
-                            submitCode();
-                        }
+                        if (index < 5) pinInputs[index + 1].requestFocus();
+                        else submitCode();
                     }
                 }
-
                 @Override
                 public void afterTextChanged(Editable s) {}
             });
-
-            // Handle backspace to move to previous box
             pinInputs[index].setOnKeyListener((v, keyCode, event) -> {
                 if (keyCode == KeyEvent.KEYCODE_DEL && event.getAction() == KeyEvent.ACTION_DOWN) {
                     if (pinInputs[index].getText().length() == 0 && index > 0) {
@@ -333,48 +404,32 @@ public class MainActivity extends AppCompatActivity {
         connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
-            public void onAvailable(@NonNull Network network) {
-                runOnUiThread(() -> updateConnectivityUI(true));
-            }
-
+            public void onAvailable(@NonNull Network network) { runOnUiThread(() -> updateConnectivityUI(true)); }
             @Override
-            public void onLost(@NonNull Network network) {
-                runOnUiThread(() -> updateConnectivityUI(false));
-            }
+            public void onLost(@NonNull Network network) { runOnUiThread(() -> updateConnectivityUI(false)); }
         };
-
-        // Check initial state
         Network activeNetwork = connectivityManager.getActiveNetwork();
         NetworkCapabilities caps = connectivityManager.getNetworkCapabilities(activeNetwork);
-        boolean isOnline = caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
-        updateConnectivityUI(isOnline);
+        updateConnectivityUI(caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
     }
 
     private void updateConnectivityUI(boolean isOnline) {
         if (tvOnlineStatus != null) {
             tvOnlineStatus.setText(isOnline ? R.string.online : R.string.offline);
-            tvOnlineStatus.setTextColor(ContextCompat.getColor(this, 
-                    isOnline ? R.color.green_primary : R.color.red_primary));
+            tvOnlineStatus.setTextColor(ContextCompat.getColor(this, isOnline ? R.color.green_primary : R.color.red_primary));
         }
-        if (vOnlineDot != null) {
-            vOnlineDot.setBackgroundResource(isOnline ? R.drawable.bg_circle_green : R.drawable.bg_circle_red);
-        }
+        if (vOnlineDot != null) vOnlineDot.setBackgroundResource(isOnline ? R.drawable.bg_circle_green : R.drawable.bg_circle_red);
     }
 
     private void configureKiosk() {
         if (devicePolicyManager != null && devicePolicyManager.isDeviceOwnerApp(getPackageName())) {
             devicePolicyManager.setLockTaskPackages(adminComponent, new String[]{getPackageName()});
-            
-            // Disable keyguard (system lock screen)
             devicePolicyManager.setKeyguardDisabled(adminComponent, true);
-
-            // Add restrictions to block settings access and other system menus
             devicePolicyManager.addUserRestriction(adminComponent, UserManager.DISALLOW_SAFE_BOOT);
             devicePolicyManager.addUserRestriction(adminComponent, UserManager.DISALLOW_FACTORY_RESET);
             devicePolicyManager.addUserRestriction(adminComponent, UserManager.DISALLOW_ADD_USER);
             devicePolicyManager.addUserRestriction(adminComponent, UserManager.DISALLOW_MOUNT_PHYSICAL_MEDIA);
             
-            // API 28+ features to explicitly block home/recents if supported
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 devicePolicyManager.setLockTaskFeatures(adminComponent, 0); 
             }
@@ -384,49 +439,29 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception e) {
                 Log.e(TAG, "Failed to start lock task", e);
             }
-            statusText.setText(R.string.tv_locked);
-        } else {
-            statusText.setText(R.string.device_owner_not_configured);
         }
     }
 
     private void relockDevice() {
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .edit()
-                .remove(KEY_UNLOCK_EXPIRY)
-                .apply();
-
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().remove(KEY_UNLOCK_EXPIRY).apply();
         clearPin();
-        statusText.setText(R.string.tv_locked);
-        
         handler.removeCallbacks(relockRunnable);
-
-        // Update station status to Time Up in Firestore
-        db.collection("stations").document(deviceId).update("status", "Time Up");
-
+        db.collection("stations").document(deviceId).update("status", "Available");
         Intent intent = new Intent(this, MainActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         startActivity(intent);
-
         if (devicePolicyManager != null && devicePolicyManager.isDeviceOwnerApp(getPackageName())) {
-            try {
-                startLockTask();
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to start lock task in relock", e);
-            }
+            try { startLockTask(); } catch (Exception ignored) {}
         }
     }
 
     private void clearPin() {
-        for (EditText et : pinInputs) {
-            et.setText("");
-        }
+        for (EditText et : pinInputs) et.setText("");
         pinInputs[0].requestFocus();
     }
 
     private boolean isCurrentlyUnlocked() {
-        long expiry = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .getLong(KEY_UNLOCK_EXPIRY, 0);
+        long expiry = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getLong(KEY_UNLOCK_EXPIRY, 0);
         return System.currentTimeMillis() < expiry;
     }
 
@@ -434,56 +469,69 @@ public class MainActivity extends AppCompatActivity {
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (!isCurrentlyUnlocked()) {
             int keyCode = event.getKeyCode();
-            // Expanded list of keys to block when locked
-            if (keyCode == KeyEvent.KEYCODE_BACK ||
-                keyCode == KeyEvent.KEYCODE_ESCAPE ||
-                keyCode == KeyEvent.KEYCODE_MENU ||
-                keyCode == KeyEvent.KEYCODE_SETTINGS ||
-                keyCode == KeyEvent.KEYCODE_SEARCH ||
-                keyCode == KeyEvent.KEYCODE_TV_INPUT ||
-                keyCode == KeyEvent.KEYCODE_GUIDE ||
-                keyCode == KeyEvent.KEYCODE_DVR ||
-                keyCode == KeyEvent.KEYCODE_HOME) {
-
-                if (event.getAction() == KeyEvent.ACTION_UP) {
-                    Toast.makeText(this, R.string.device_is_locked, Toast.LENGTH_SHORT).show();
-                }
-                return true; // Consume event
+            if (keyCode >= KeyEvent.KEYCODE_0 && keyCode <= KeyEvent.KEYCODE_9 ||
+                keyCode >= KeyEvent.KEYCODE_NUMPAD_0 && keyCode <= KeyEvent.KEYCODE_NUMPAD_9 ||
+                keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                keyCode == KeyEvent.KEYCODE_ENTER ||
+                keyCode == KeyEvent.KEYCODE_DPAD_UP ||
+                keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+                keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+                keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+                keyCode == KeyEvent.KEYCODE_DEL) {
+                return super.dispatchKeyEvent(event);
             }
+            return true;
         }
         return super.dispatchKeyEvent(event);
     }
 
     @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (!isCurrentlyUnlocked()) {
+            if (keyCode >= KeyEvent.KEYCODE_0 && keyCode <= KeyEvent.KEYCODE_9 ||
+                keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER ||
+                keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+                keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+                keyCode == KeyEvent.KEYCODE_DEL) {
+                return super.onKeyDown(keyCode, event);
+            }
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus && !isCurrentlyUnlocked()) {
+            Intent intent = new Intent(this, MainActivity.class);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            startActivity(intent);
+        }
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
-        
         handler.removeCallbacks(clockRunnable);
         handler.post(clockRunnable);
 
         if (connectivityManager != null && networkCallback != null) {
             NetworkRequest networkRequest = new NetworkRequest.Builder()
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .build();
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build();
             connectivityManager.registerNetworkCallback(networkRequest, networkCallback);
         }
 
-        long expiry = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .getLong(KEY_UNLOCK_EXPIRY, 0);
+        long expiry = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getLong(KEY_UNLOCK_EXPIRY, 0);
         long timeLeft = expiry - System.currentTimeMillis();
 
         if (timeLeft > 0) {
+            if (isInLockTaskMode()) stopLockTask();
             handler.removeCallbacks(relockRunnable);
             handler.postDelayed(relockRunnable, timeLeft);
-            statusText.setText(R.string.unlocked);
         } else {
             if (devicePolicyManager != null && devicePolicyManager.isDeviceOwnerApp(getPackageName())) {
-                try {
-                    startLockTask();
-                    statusText.setText(R.string.tv_locked);
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to start lock task in onResume", e);
-                }
+                try { startLockTask(); } catch (Exception ignored) {}
             }
         }
     }
@@ -492,17 +540,13 @@ public class MainActivity extends AppCompatActivity {
     protected void onPause() {
         super.onPause();
         handler.removeCallbacks(clockRunnable);
-        if (connectivityManager != null && networkCallback != null) {
-            connectivityManager.unregisterNetworkCallback(networkCallback);
-        }
+        if (connectivityManager != null && networkCallback != null) connectivityManager.unregisterNetworkCallback(networkCallback);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         handler.removeCallbacks(relockRunnable);
-        if (stationListener != null) {
-            stationListener.remove();
-        }
+        if (stationListener != null) stationListener.remove();
     }
 }

@@ -367,6 +367,7 @@
                         tools:ignore="SmallSp" />
 
                     <TextView
+                        android:id="@+id/tv_station_name"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
@@ -442,6 +443,7 @@
                             tools:ignore="SmallSp" />
 
                         <TextView
+                            android:id="@+id/tv_hourly_rate"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/rate_value"
@@ -496,6 +498,7 @@
                             tools:ignore="SmallSp" />
 
                         <TextView
+                            android:id="@+id/tv_station_status_value"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/status_value"
@@ -542,6 +545,7 @@
                             tools:ignore="SmallSp" />
 
                         <TextView
+                            android:id="@+id/tv_prepaid_duration"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="@string/min_time_value"
