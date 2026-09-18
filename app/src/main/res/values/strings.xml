@@ -42,4 +42,20 @@
     <string name="device_owner_not_configured">Device Owner not configured</string>
     <string name="unlocked">Unlocked</string>
     <string name="device_is_locked">Device is locked</string>
+    <string name="verifying_code_status">Verifying code...</string>
+    <string name="wrong_station_message">Wrong Station</string>
+    <string name="network_error_message">Network Error</string>
+
+    <!-- Registration -->
+    <string name="registration_title">Device Registration</string>
+    <string name="registration_subtitle">Please link this TV to your Lounge</string>
+    <string name="lounge_id_hint">Lounge ID</string>
+    <string name="reg_code_hint">6-Digit Registration Code</string>
+    <string name="btn_register_text">Register Station</string>
+    <string name="invalid_lounge_id">Lounge ID is required</string>
+    <string name="invalid_reg_code">6-digit registration code required</string>
+    <string name="lounge_not_found">Lounge not found</string>
+    <string name="code_mismatch">Invalid registration code</string>
+    <string name="code_expired">Registration code has expired</string>
+    <string name="registration_success">Station registered successfully!</string>
 </resources>
